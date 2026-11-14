@@ -41,6 +41,14 @@ type Config struct {
 	// Proxy-Adresse kommen. Nur einschalten, wenn der Dienst ausschliesslich
 	// ueber den Proxy erreichbar ist, sonst laesst sich die Kopfzeile faelschen.
 	TrustProxy bool `json:"trust_proxy"`
+
+	// Oeffentliche Adresse der Weboberflaeche, fuer Links in Nachrichten.
+	PublicURL string `json:"public_url"`
+
+	// Matrix-Benachrichtigungen. Nur aktiv, wenn alle drei gesetzt sind.
+	MatrixHomeserver string            `json:"matrix_homeserver"`
+	MatrixToken      string            `json:"matrix_token"`
+	MatrixUsers      map[string]string `json:"matrix_users"` // Stations-ID -> @name:server
 }
 
 func defaultConfig() Config {
@@ -119,6 +127,18 @@ func loadConfig(path string) (Config, error) {
 		}
 	}
 
+	for id, mxid := range cfg.MatrixUsers {
+		if !seen[id] {
+			return cfg, fmt.Errorf("Matrix: %q ist keine bekannte Benutzer-ID", id)
+		}
+		if !validMXID.MatchString(mxid) {
+			return cfg, fmt.Errorf("Matrix: %q ist keine gueltige Matrix-ID (erwartet @name:server)", mxid)
+		}
+	}
+	if cfg.MatrixHomeserver != "" && !strings.HasPrefix(cfg.MatrixHomeserver, "http") {
+		return cfg, fmt.Errorf("MATRIX_HOMESERVER muss mit http:// oder https:// beginnen")
+	}
+
 	abs, err := filepath.Abs(cfg.DataDir)
 	if err != nil {
 		return cfg, err
@@ -173,6 +193,16 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 	if err := flag("SCAN_TRUST_PROXY", &cfg.TrustProxy); err != nil {
 		return err
 	}
+	str("SCAN_PUBLIC_URL", &cfg.PublicURL)
+	str("MATRIX_HOMESERVER", &cfg.MatrixHomeserver)
+	str("MATRIX_TOKEN", &cfg.MatrixToken)
+	if v, ok := lookup("SCAN_MATRIX_USERS"); ok && strings.TrimSpace(v) != "" {
+		m, err := parseMatrixUsers(v)
+		if err != nil {
+			return fmt.Errorf("SCAN_MATRIX_USERS: %w", err)
+		}
+		cfg.MatrixUsers = m
+	}
 
 	if v, ok := lookup("SCAN_USERS"); ok && strings.TrimSpace(v) != "" {
 		users, err := parseUsers(v)
@@ -182,6 +212,24 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		cfg.Users = users
 	}
 	return nil
+}
+
+// parseMatrixUsers liest SCAN_MATRIX_USERS: id=@name:server, getrennt durch
+// Komma. Eigene Variable, weil Matrix-IDs selbst Doppelpunkte enthalten.
+func parseMatrixUsers(s string) (map[string]string, error) {
+	m := map[string]string{}
+	for i, entry := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '\n' || r == ';' }) {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		id, mxid, ok := strings.Cut(entry, "=")
+		if !ok {
+			return nil, fmt.Errorf("Eintrag %d: erwartet id=@name:server", i+1)
+		}
+		m[strings.TrimSpace(id)] = strings.TrimSpace(mxid)
+	}
+	return m, nil
 }
 
 // parseUsers liest SCAN_USERS. Personen sind durch Komma (oder Zeilenumbruch)

@@ -29,6 +29,12 @@ services:
       SCAN_TRUST_PROXY: ${SCAN_TRUST_PROXY:-false}
       SCAN_RETENTION_DAYS: ${SCAN_RETENTION_DAYS:-7}
       SCAN_OCR_LANG: ${SCAN_OCR_LANG:-deu+eng}
+      # Adresse der Weboberflaeche, fuer Links in Matrix-Nachrichten.
+      SCAN_PUBLIC_URL: ${SCAN_PUBLIC_URL:-}
+      # Matrix-Benachrichtigungen (optional). SCAN_MATRIX_USERS: id=@name:server,...
+      MATRIX_HOMESERVER: ${MATRIX_HOMESERVER:-}
+      MATRIX_TOKEN: ${MATRIX_TOKEN:-}
+      SCAN_MATRIX_USERS: ${SCAN_MATRIX_USERS:-}
       # IP des Scanners. Im Router auf eine feste Adresse festnageln.
       SCANNER_IP: ${SCANNER_IP:-192.168.178.98}
       SCANNER_MODEL: "MFC-5440CN"

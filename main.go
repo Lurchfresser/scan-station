@@ -36,6 +36,11 @@ func main() {
 	checkTools(cfg)
 
 	station := NewStation(cfg)
+	if station.notify != nil {
+		go station.notify.CheckLogin()
+	} else if cfg.MatrixHomeserver != "" || len(cfg.MatrixUsers) > 0 {
+		log.Printf("Hinweis: Matrix unvollstaendig eingerichtet (MATRIX_HOMESERVER, MATRIX_TOKEN und SCAN_MATRIX_USERS noetig)")
+	}
 	station.startCleanupLoop()
 
 	srv := &http.Server{

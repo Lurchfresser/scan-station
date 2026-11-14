@@ -68,6 +68,9 @@ type Job struct {
 	Waiting  bool      `json:"waiting"` // wartet auf das Umdrehen des Stapels
 	Fronts   int       `json:"fronts"`  // Anzahl Vorderseiten beim Doppelseitig-Scan
 
+	// Von der Person selbst abgebrochen: dann keine Fehlermeldung schicken.
+	canceled bool
+
 	// Arbeitsverzeichnis mit den bisher gescannten Seiten, nur waehrend
 	// der Auftrag laeuft. Fuer die Vorschau.
 	workdir string
@@ -85,10 +88,12 @@ type Station struct {
 
 	previewMu sync.Mutex
 	flip      chan duplexAction
+
+	notify *Notifier // nil, wenn Matrix nicht eingerichtet ist
 }
 
 func NewStation(cfg Config) *Station {
-	return &Station{cfg: cfg}
+	return &Station{cfg: cfg, notify: NewNotifier(cfg)}
 }
 
 // Snapshot gibt eine Kopie des aktuellen oder letzten Auftrags zurueck.
@@ -154,6 +159,10 @@ func (s *Station) Start(u User, opts ScanOptions) error {
 		s.cancel = nil
 		s.flip = nil
 		job.Waiting = false
+
+		if !job.canceled {
+			s.notify.Notify(u.ID, resultMessage(job, opts)+s.notify.link())
+		}
 	}()
 
 	return nil
@@ -169,6 +178,7 @@ func (s *Station) Cancel() bool {
 	s.cancel()
 	if s.job != nil {
 		s.job.Note = "Abgebrochen."
+		s.job.canceled = true
 	}
 	return true
 }
@@ -321,6 +331,11 @@ func (s *Station) storeAll(outs []outFile, userID string) error {
 // scanBacks wartet, bis der Stapel umgedreht ist, scannt die Rueckseiten und
 // setzt alles in die richtige Reihenfolge.
 func (s *Station) scanBacks(ctx context.Context, job *Job, workdir string, opts ScanOptions, fronts []string) ([]string, []string, error) {
+	s.notify.Notify(job.UserID, fmt.Sprintf(
+		"🔄 Vorderseiten fertig (%d). Stapel aus der Ablage nehmen, als Ganzes umdrehen, "+
+			"wieder einlegen und in der Weboberfläche „Rückseiten scannen“ tippen.",
+		len(fronts))+s.notify.link())
+
 	s.mu.Lock()
 	job.Waiting = true
 	job.Fronts = len(fronts)
@@ -361,6 +376,28 @@ func (s *Station) scanBacks(ctx context.Context, job *Job, workdir string, opts 
 			len(fronts), len(backs))}, nil
 	}
 	return all, nil, nil
+}
+
+// resultMessage formuliert die Nachricht zum Ende eines Auftrags.
+func resultMessage(job *Job, opts ScanOptions) string {
+	if job.State == StateError {
+		return "❌ Scan fehlgeschlagen: " + job.Note
+	}
+	what := fmt.Sprintf("%d Seite(n)", job.Pages)
+	if opts.Output == outputPNG {
+		what = fmt.Sprintf("%d Bild(er)", job.Pages)
+	}
+	file := job.File
+	if opts.Output == outputPNG && job.Pages > 1 {
+		// ..._s001.png bis ..._s004.png
+		file = fmt.Sprintf("%s bis %s", job.File,
+			strings.Replace(job.File, "_s001.png", fmt.Sprintf("_s%03d.png", job.Pages), 1))
+	}
+	msg := fmt.Sprintf("✅ Scan fertig: %s, %s", what, file)
+	if job.Note != "" {
+		msg += "\n" + job.Note
+	}
+	return msg
 }
 
 func ocrAvailable() bool {
