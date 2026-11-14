@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -61,6 +62,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/download/", s.handleDownload)
 	mux.HandleFunc("/delete", s.handleDelete)
+	mux.HandleFunc("/preview/", s.handlePreview)
 	return mux
 }
 
@@ -105,7 +107,18 @@ func (s *Server) currentUser(r *http.Request) (User, bool) {
 	return s.cfg.userByID(sess.userID)
 }
 
-func clientIP(r *http.Request) string {
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxy {
+		// Traefik haengt die Adresse, von der es die Anfrage bekam, hinten an.
+		// Nur dieser Eintrag ist vertrauenswuerdig, davor kann der Client
+		// beliebiges eintragen.
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if ip := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
@@ -171,7 +184,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if locked, wait := s.checkLockout(ip); locked {
 		s.renderLogin(w, r, fmt.Sprintf("Zu viele Fehlversuche. Bitte in %s erneut probieren.", wait))
 		return
@@ -215,6 +228,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   s.isHTTPS(r),
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -269,12 +283,17 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := ScanOptions{Mode: mode, Resolution: res, Source: source, Prefix: prefix}
+	output := outputPDF
+	if r.FormValue("output") == outputPNG {
+		output = outputPNG
+	}
+
+	opts := ScanOptions{Mode: mode, Resolution: res, Source: source, Prefix: prefix, Output: output}
 	if err := s.st.Start(u, opts); err != nil {
 		redirectErr(w, r, "Es läuft gerade ein anderer Scan. Bitte warten, das Gerät kann nur einen Auftrag auf einmal.")
 		return
 	}
-	log.Printf("Auftrag gestartet von %s: %s, %d dpi, %s", u.ID, mode, res, source)
+	log.Printf("Auftrag gestartet von %s: %s, %d dpi, %s, %s", u.ID, mode, res, source, output)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -305,6 +324,8 @@ type statusResponse struct {
 	Mine     bool     `json:"mine"`
 	Who      string   `json:"who"`
 	Elapsed  int      `json:"elapsed"`
+	Job      string   `json:"job,omitempty"`
+	Done     int      `json:"done"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -326,6 +347,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if resp.Mine {
 		resp.Note = job.Note
 		resp.File = job.File
+		resp.Job = job.ID
+		if job.State == StateRunning {
+			resp.Done = s.st.CompletedPages(u.ID)
+		}
 	}
 	if !job.Started.IsZero() {
 		end := job.Finished
@@ -354,7 +379,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/pdf")
+	if strings.HasSuffix(name, ".png") {
+		w.Header().Set("Content-Type", "image/png")
+	} else {
+		w.Header().Set("Content-Type", "application/pdf")
+	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
 	http.ServeFile(w, r, path)
 }
@@ -376,6 +405,42 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/?info="+urlEncode("Datei gelöscht."), http.StatusSeeOther)
+}
+
+// handlePreview liefert eine verkleinerte Ansicht einer bereits gescannten
+// Seite des eigenen, laufenden Auftrags: GET /preview/<seite>
+func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.currentUser(r)
+	if !ok {
+		http.Error(w, "nicht angemeldet", http.StatusUnauthorized)
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/preview/"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := s.st.Preview(u.ID, n)
+	if err != nil {
+		if !errors.Is(err, errNoPreview) {
+			log.Printf("Vorschau Seite %d: %v", n, err)
+		}
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	// Die URL enthaelt die Auftragsnummer, deshalb darf der Browser cachen.
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeFile(w, r, path)
+}
+
+// isHTTPS meldet, ob der Browser die Seite per HTTPS sieht, direkt oder
+// ueber den Proxy. Dann bekommt das Sitzungscookie das Secure-Flag.
+func (s *Server) isHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return s.cfg.TrustProxy && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func redirectErr(w http.ResponseWriter, r *http.Request, msg string) {

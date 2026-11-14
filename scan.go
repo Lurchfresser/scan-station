@@ -35,6 +35,18 @@ type ScanOptions struct {
 	Resolution int
 	Source     string // "Automatic Document Feeder" oder "FlatBed"
 	Prefix     string
+	Output     string // outputPDF oder outputPNG
+}
+
+const (
+	outputPDF = "pdf" // alle Seiten in einer PDF-Datei
+	outputPNG = "png" // jede Seite als eigene PNG-Datei
+)
+
+// outFile ist eine fertige Datei im Arbeitsverzeichnis samt Zielnamen.
+type outFile struct {
+	path string
+	name string
 }
 
 type Job struct {
@@ -50,6 +62,10 @@ type Job struct {
 	Note     string    `json:"note"`
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
+
+	// Arbeitsverzeichnis mit den bisher gescannten Seiten, nur waehrend
+	// der Auftrag laeuft. Fuer die Vorschau.
+	workdir string
 }
 
 // Station fuehrt die Scanauftraege aus. Das Geraet kann nur einen Auftrag
@@ -61,6 +77,8 @@ type Station struct {
 	job    *Job
 	busy   bool
 	cancel context.CancelFunc
+
+	previewMu sync.Mutex
 }
 
 func NewStation(cfg Config) *Station {
@@ -164,7 +182,15 @@ func (s *Station) run(ctx context.Context, job *Job, u User, opts ScanOptions) e
 	if err != nil {
 		return fmt.Errorf("Arbeitsverzeichnis konnte nicht angelegt werden: %w", err)
 	}
-	defer os.RemoveAll(workdir)
+	s.mu.Lock()
+	job.workdir = workdir
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		job.workdir = ""
+		s.mu.Unlock()
+		os.RemoveAll(workdir)
+	}()
 
 	pages, err := s.scanPages(ctx, job, workdir, opts)
 	if err != nil {
@@ -172,54 +198,87 @@ func (s *Station) run(ctx context.Context, job *Job, u User, opts ScanOptions) e
 	}
 	s.setPages(job, len(pages))
 
-	name := fmt.Sprintf("%s_%s.pdf", opts.Prefix, job.Started.Format("2006-01-02_1504"))
-	pdf := filepath.Join(workdir, name)
+	base := fmt.Sprintf("%s_%s", opts.Prefix, job.Started.Format("2006-01-02_1504"))
 
-	s.setStep(job, "PDF erstellen", 0)
-	if err := s.makePDF(ctx, pages, pdf); err != nil {
-		return err
-	}
-
-	if _, err := exec.LookPath("ocrmypdf"); err == nil {
-		s.setStep(job, "Texterkennung", 0)
-		if err := s.runOCR(ctx, pdf); err != nil {
-			// Ohne Texterkennung ist das PDF weiterhin brauchbar.
-			log.Printf("Auftrag %s: OCR uebersprungen: %v", job.ID, err)
-			s.mu.Lock()
-			job.Note = "Hinweis: Die Texterkennung ist fehlgeschlagen, das PDF enthaelt nur Bilder."
-			s.mu.Unlock()
+	var outs []outFile
+	if opts.Output == outputPNG {
+		// Einzelne Seiten: kein PDF, keine Texterkennung.
+		for i, p := range pages {
+			outs = append(outs, outFile{path: p, name: fmt.Sprintf("%s_s%03d.png", base, i+1)})
 		}
+	} else {
+		name := base + ".pdf"
+		pdf := filepath.Join(workdir, name)
+
+		s.setStep(job, "PDF erstellen", 0)
+		if err := s.makePDF(ctx, pages, pdf); err != nil {
+			return err
+		}
+
+		// Texterkennung nur fuer die Download-Ablage. Ziele wie Paperless
+		// erkennen den Text selbst und drehen dabei auch die Seiten; eine
+		// eigene Textebene wuerde das dort verhindern (OCR-Modus "skip").
+		if _, err := exec.LookPath("ocrmypdf"); err == nil && u.Target == "download" {
+			s.setStep(job, "Texterkennung", 0)
+			if err := s.runOCR(ctx, pdf); err != nil {
+				// Ohne Texterkennung ist das PDF weiterhin brauchbar.
+				log.Printf("Auftrag %s: OCR uebersprungen: %v", job.ID, err)
+				s.mu.Lock()
+				job.Note = "Hinweis: Die Texterkennung ist fehlgeschlagen, das PDF enthaelt nur Bilder."
+				s.mu.Unlock()
+			}
+		}
+		outs = []outFile{{path: pdf, name: name}}
 	}
 
 	switch u.Target {
 	case "ocis":
 		s.setStep(job, "Upload in die Cloud", 0)
-		if err := s.upload(ctx, pdf, u.Remote); err != nil {
+		var upErr error
+		for _, o := range outs {
+			if upErr = s.upload(ctx, o.path, u.Remote, o.name); upErr != nil {
+				break
+			}
+		}
+		if upErr != nil {
 			// Der Scan ist zu wertvoll, um ihn zu verlieren: bei einem
 			// fehlgeschlagenen Upload bleibt er lokal abrufbar.
-			if saveErr := s.store(pdf, u.ID, name); saveErr != nil {
-				return fmt.Errorf("%v (auch die lokale Sicherung schlug fehl: %v)", err, saveErr)
+			if saveErr := s.storeAll(outs, u.ID); saveErr != nil {
+				return fmt.Errorf("%v (auch die lokale Sicherung schlug fehl: %v)", upErr, saveErr)
 			}
 			s.mu.Lock()
-			job.File = name
+			job.File = outs[0].name
 			job.Target = "download"
 			s.mu.Unlock()
-			return fmt.Errorf("%v Der Scan liegt stattdessen hier zum Download bereit", err)
+			return fmt.Errorf("%v Der Scan liegt stattdessen hier zum Download bereit", upErr)
 		}
 		s.mu.Lock()
-		job.Note = fmt.Sprintf("In der Cloud gespeichert: %s/%s", u.Remote, name)
+		if len(outs) == 1 {
+			job.Note = fmt.Sprintf("In der Cloud gespeichert: %s/%s", u.Remote, outs[0].name)
+		} else {
+			job.Note = fmt.Sprintf("%d Bilder in der Cloud gespeichert unter %s.", len(outs), u.Remote)
+		}
 		s.mu.Unlock()
 
 	default:
 		s.setStep(job, "Ablegen", 0)
-		if err := s.store(pdf, u.ID, name); err != nil {
+		if err := s.storeAll(outs, u.ID); err != nil {
 			return err
 		}
 		s.mu.Lock()
-		job.File = name
+		job.File = outs[0].name
 		s.mu.Unlock()
 	}
 
+	return nil
+}
+
+func (s *Station) storeAll(outs []outFile, userID string) error {
+	for _, o := range outs {
+		if err := s.store(o.path, userID, o.name); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -278,7 +337,9 @@ func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts 
 		if m := progressRe.FindStringSubmatch(line); m != nil {
 			var p float64
 			fmt.Sscanf(m[1], "%f", &p)
-			s.setStep(job, fmt.Sprintf("Seite %d scannen", pagesSeen+1), int(p))
+			// "Scanning page N" kommt zu Beginn der Seite, pagesSeen ist also
+			// schon die aktuelle Seite. Beim Flachbett fehlt die Zeile.
+			s.setStep(job, fmt.Sprintf("Seite %d scannen", max(pagesSeen, 1)), int(p))
 			continue
 		}
 		if strings.Contains(line, "Scanning page") {
@@ -337,7 +398,10 @@ func explainScanError(out string, waitErr error) string {
 	case strings.Contains(low, "device busy"), strings.Contains(low, "busy"):
 		return "Das Gerät ist beschäftigt. Warten Sie einen Moment und versuchen Sie es erneut."
 	case strings.Contains(low, "invalid argument"):
-		return "Das Gerät hat die Einstellungen abgelehnt. Versuchen Sie eine niedrigere Auflösung."
+		// Kommt auch, wenn der Treiber das Gerät gar nicht erreicht oder das
+		// SANE-Backend nicht geladen wurde, nicht nur bei falschen Optionen.
+		return "Das Gerät hat die Einstellungen abgelehnt oder ist nicht erreichbar. " +
+			"Prüfen Sie, ob der Scanner eingeschaltet ist, und versuchen Sie sonst eine niedrigere Auflösung."
 	case strings.Contains(low, "error during device i/o"), strings.Contains(low, "network"):
 		return "Keine Verbindung zum Scanner. Prüfen Sie, ob das Gerät eingeschaltet und im Netz ist."
 	case out != "":
@@ -361,7 +425,16 @@ func (s *Station) makePDF(ctx context.Context, pages []string, out string) error
 func (s *Station) runOCR(ctx context.Context, pdf string) error {
 	tmp := pdf + ".ocr"
 	cmd := exec.CommandContext(ctx, "ocrmypdf",
-		"-l", s.cfg.OCRLang, "--optimize", "1", "--quiet", pdf, tmp)
+		"-l", s.cfg.OCRLang, "--optimize", "1",
+		// Verkehrt herum oder quer eingelegte Seiten aufrichten (Tesseract
+		// erkennt die Ausrichtung). Sonst wuerde der Text auf dem Kopf
+		// gelesen, und Paperless dreht Seiten mit Textebene nicht mehr.
+		// Die Erkennung ist bei diesen Scans recht unsicher (Konfidenz oft
+		// 3-12), die Standardschwelle 14 dreht fast nichts. Getestet: Seiten,
+		// die schon richtig stehen, werden zuverlaessig als aufrecht erkannt
+		// und nicht gedreht, deshalb ist eine niedrige Schwelle unbedenklich.
+		"--rotate-pages", "--rotate-pages-threshold", "2",
+		"--quiet", pdf, tmp)
 	if msg, err := runCaptured(cmd); err != nil {
 		os.Remove(tmp)
 		return errors.New(msgOr(msg, err))
@@ -369,16 +442,17 @@ func (s *Station) runOCR(ctx context.Context, pdf string) error {
 	return os.Rename(tmp, pdf)
 }
 
-func (s *Station) upload(ctx context.Context, pdf, remote string) error {
-	cmd := exec.CommandContext(ctx, "rclone", "copy", pdf, strings.TrimSuffix(remote, "/")+"/")
+// upload kopiert eine Datei unter dem Namen name nach remote.
+func (s *Station) upload(ctx context.Context, src, remote, name string) error {
+	cmd := exec.CommandContext(ctx, "rclone", "copyto", src, strings.TrimSuffix(remote, "/")+"/"+name)
 	if msg, err := runCaptured(cmd); err != nil {
 		return fmt.Errorf("Der Upload in die Cloud ist fehlgeschlagen: %s.", msgOr(msg, err))
 	}
 	return nil
 }
 
-// store legt das PDF im Ordner der Person ab, sichtbar nur fuer sie.
-func (s *Station) store(pdf, userID, name string) error {
+// store legt eine Datei im Ordner der Person ab, sichtbar nur fuer sie.
+func (s *Station) store(src, userID, name string) error {
 	dir := filepath.Join(s.cfg.DataDir, userID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("Zielordner konnte nicht angelegt werden: %w", err)
@@ -387,7 +461,7 @@ func (s *Station) store(pdf, userID, name string) error {
 
 	// Kopieren statt Umbenennen, da /tmp auf einem anderen Dateisystem
 	// liegen kann.
-	in, err := os.Open(pdf)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
@@ -428,7 +502,7 @@ func (s *Station) listFiles(userID string) ([]StoredFile, error) {
 
 	var files []StoredFile
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".pdf") {
+		if e.IsDir() || !validFileName.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
@@ -438,7 +512,13 @@ func (s *Station) listFiles(userID string) ([]StoredFile, error) {
 		files = append(files, StoredFile{Name: e.Name(), Size: info.Size(), ModTime: info.ModTime()})
 	}
 	sort.Slice(files, func(i, j int) bool {
-		return files[i].ModTime.After(files[j].ModTime)
+		// Seiten eines Auftrags haben fast dieselbe Zeit, deshalb pro
+		// Minute nach Namen sortieren, damit s001, s002, ... in Reihe stehen.
+		ti, tj := files[i].ModTime.Truncate(time.Minute), files[j].ModTime.Truncate(time.Minute)
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return files[i].Name < files[j].Name
 	})
 	return files, nil
 }

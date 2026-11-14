@@ -133,6 +133,16 @@ ul.files li:first-child { border-top:0; }
 a.dl { font-weight:600; color:var(--accent); text-decoration:none;
        word-break:break-all; }
 progress { width:100%; height:.7rem; }
+.thumbs { display:grid; grid-template-columns:repeat(auto-fill, minmax(6.5rem, 1fr));
+          gap:.6rem; margin:.8rem 0; }
+.thumbs:empty { display:none; }
+.thumb { display:block; text-decoration:none; color:var(--muted); font-size:.8rem;
+         text-align:center; }
+.thumb img, .thumb .pending { display:block; width:100%; aspect-ratio:210/297;
+         object-fit:contain; background:var(--bg); border:1px solid var(--line);
+         border-radius:5px; }
+.thumb .pending { display:flex; align-items:center; justify-content:center;
+                  font-size:.85rem; }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:.6rem; }
 `
 
@@ -206,6 +216,7 @@ const mainHTML = `<!DOCTYPE html>
     <p id="statusStep" class="muted">Wird gestartet …</p>
     <progress id="statusBar" max="100" value="0"></progress>
     <p class="muted" id="statusMeta"></p>
+    <div class="thumbs" id="thumbs"></div>
     <form method="post" action="/cancel">
       <button class="secondary" type="submit">Abbrechen</button>
     </form>
@@ -240,6 +251,12 @@ const mainHTML = `<!DOCTYPE html>
         </select>
       </div>
     </div>
+
+    <label for="output">Ausgabe</label>
+    <select id="output" name="output">
+      <option value="pdf" selected>Eine PDF-Datei (alle Seiten)</option>
+      <option value="png">Einzelne Bilder (PNG, eine Datei pro Seite)</option>
+    </select>
 
     <label for="prefix">Name</label>
     <input id="prefix" name="prefix" type="text" value="scan" maxlength="32">
@@ -286,6 +303,38 @@ var card = document.getElementById('statusCard');
 var stepEl = document.getElementById('statusStep');
 var barEl = document.getElementById('statusBar');
 var metaEl = document.getElementById('statusMeta');
+var thumbsEl = document.getElementById('thumbs');
+var shownJob = '', shownPages = 0, pendingEl = null;
+
+// Fertige Seiten als Vorschau anhaengen, die gerade laufende als Platzhalter.
+function updateThumbs(s) {
+  if (s.job !== shownJob) {
+    thumbsEl.textContent = '';
+    shownJob = s.job; shownPages = 0; pendingEl = null;
+  }
+  if (pendingEl) { pendingEl.remove(); pendingEl = null; }
+  while (shownPages < s.done) {
+    shownPages++;
+    var url = '/preview/' + shownPages + '?j=' + encodeURIComponent(s.job);
+    var a = document.createElement('a');
+    a.className = 'thumb'; a.href = url; a.target = '_blank';
+    var img = document.createElement('img');
+    img.src = url; img.alt = 'Seite ' + shownPages; img.loading = 'lazy';
+    a.appendChild(img);
+    a.appendChild(document.createTextNode('Seite ' + shownPages));
+    thumbsEl.appendChild(a);
+  }
+  if (/scannen/.test(s.step || '')) {
+    pendingEl = document.createElement('div');
+    pendingEl.className = 'thumb';
+    var box = document.createElement('div');
+    box.className = 'pending';
+    box.textContent = (s.progress || 0) + ' %';
+    pendingEl.appendChild(box);
+    pendingEl.appendChild(document.createTextNode('Seite ' + (shownPages + 1)));
+    thumbsEl.appendChild(pendingEl);
+  }
+}
 
 function mmss(sec) {
   var m = Math.floor(sec / 60), s = sec % 60;
@@ -309,9 +358,10 @@ async function poll() {
     stepEl.textContent = s.step || 'Wird gestartet …';
     barEl.value = s.progress || 0;
     var parts = [];
-    if (s.pages > 0) { parts.push(s.pages + ' Seite(n) erfasst'); }
+    if (s.done > 0) { parts.push(s.done + ' Seite(n) fertig'); }
     if (s.elapsed > 0) { parts.push('Laufzeit ' + mmss(s.elapsed)); }
     metaEl.textContent = parts.join(' · ');
+    updateThumbs(s);
     setTimeout(poll, 2000);
     return;
   }

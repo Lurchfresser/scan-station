@@ -1,0 +1,36 @@
+{
+  "scanner": "brother2:net1;dev0",
+  "listen": ":8080",
+  "trust_proxy": true,
+  "data_dir": "/data",
+  "retention_days": 7,
+  "ocr_lang": "deu+eng",
+  "paper_width_mm": 210,
+  "paper_height_mm": 297,
+  "users": [
+    {
+      "id": "ich",
+      "name": "Ich",
+      "pin": "BITTE-AENDERN",
+      "target": "download"
+    },
+    {
+      "id": "anna",
+      "name": "Anna",
+      "pin": "BITTE-AENDERN",
+      "target": "download"
+    },
+    {
+      "id": "ben",
+      "name": "Ben",
+      "pin": "BITTE-AENDERN",
+      "target": "download"
+    },
+    {
+      "id": "carla",
+      "name": "Carla",
+      "pin": "BITTE-AENDERN",
+      "target": "download"
+    }
+  ]
+}

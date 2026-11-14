@@ -1,0 +1,44 @@
+services:
+  scan-station:
+    build:
+      context: .
+      args:
+        # true nimmt ocrmypdf und Tesseract mit auf (ca. 600 MB mehr).
+        WITH_OCR: "true"
+    image: scan-station:local
+    # brscan2 gibt es nur als amd64-Paket.
+    platform: linux/amd64
+    restart: unless-stopped
+
+    # Normales Bridge-Netz genuegt: Der Treiber baut nur ausgehende
+    # Verbindungen zum Scanner auf (TCP 54921), die gehen ueber das NAT von
+    # Docker. Kein Port wird veroeffentlicht, erreichbar ist der Dienst nur
+    # ueber Traefik. Die Domain wird in Dokploy unter "Domains" angelegt
+    # (Service scan-station, Port 8080); Dokploy haengt den Container dabei
+    # ins dokploy-network und setzt die Traefik-Labels selbst.
+    #
+    # Lokal ohne Dokploy testen: einen Port freigeben, z.B.
+    #   ports: ["127.0.0.1:8081:8080"]
+    # und in config.json "trust_proxy": false setzen.
+
+    # VORUEBERGEHEND zum Testen im LAN. Vor dem Umzug nach Dokploy entfernen
+    # und in config.json "trust_proxy" wieder auf true setzen.
+    ports:
+      - "8081:8080"
+
+    environment:
+      TZ: Europe/Berlin
+      # IP des Scanners. Im Router auf eine feste Adresse festnageln.
+      SCANNER_IP: "192.168.178.98"
+      SCANNER_MODEL: "MFC-5440CN"
+      SCANNER_NAME: "MFC-5440CN"
+      # Besitzer der Dateien im Datenordner. `id -u` und `id -g` auf dem Host.
+      PUID: "1000"
+      PGID: "1000"
+
+    volumes:
+      # config.json ist nicht im Git (PINs). In Dokploy als File Mount
+      # anlegen und CONFIG_FILE=../files/config.json setzen, ebenso
+      # DATA_DIR=../files/data, damit die Scans ein Redeploy ueberleben.
+      - ${CONFIG_FILE:-./config.json}:/etc/scan-station/config.json:ro
+      - ${DATA_DIR:-./data}:/data

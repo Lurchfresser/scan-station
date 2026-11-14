@@ -31,6 +31,13 @@ type Config struct {
 	PaperWidthMM  int    `json:"paper_width_mm"`
 	PaperHeightMM int    `json:"paper_height_mm"`
 	Users         []User `json:"users"`
+
+	// TrustProxy: der Dienst laeuft hinter einem Reverse Proxy (Traefik).
+	// Dann gilt der letzte Eintrag in X-Forwarded-For als Adresse des
+	// Aufrufers, sonst saehe die Anmeldesperre alle Anfragen von derselben
+	// Proxy-Adresse kommen. Nur einschalten, wenn der Dienst ausschliesslich
+	// ueber den Proxy erreichbar ist, sonst laesst sich die Kopfzeile faelschen.
+	TrustProxy bool `json:"trust_proxy"`
 }
 
 func defaultConfig() Config {

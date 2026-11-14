@@ -30,7 +30,7 @@ var allowedResolutions = map[int]bool{
 var (
 	validID       = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 	validPrefix   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
-	validFileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.pdf$`)
+	validFileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.(pdf|png)$`)
 )
 
 func newToken(n int) string {
