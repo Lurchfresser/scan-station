@@ -21,6 +21,7 @@ type loginData struct {
 type mainData struct {
 	User          User
 	IsCloud       bool
+	CanOCR        bool
 	Remote        string
 	Files         []fileView
 	RetentionDays int
@@ -67,6 +68,7 @@ func (s *Server) renderMain(w http.ResponseWriter, r *http.Request, u User, errM
 	data := mainData{
 		User:          u,
 		IsCloud:       u.Target == "ocis",
+		CanOCR:        ocrAvailable() && u.Target == "download",
 		Remote:        u.Remote,
 		Files:         views,
 		RetentionDays: s.cfg.RetentionDays,
@@ -143,6 +145,10 @@ progress { width:100%; height:.7rem; }
          border-radius:5px; }
 .thumb .pending { display:flex; align-items:center; justify-content:center;
                   font-size:.85rem; }
+label.check { display:flex; gap:.5rem; align-items:center; font-weight:500; }
+label.check input { width:1.1rem; height:1.1rem; }
+.flip { border:2px solid var(--accent); border-radius:8px; padding:.8rem; margin:.8rem 0; }
+.flip .row { flex-wrap:wrap; justify-content:flex-start; }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:.6rem; }
 `
 
@@ -216,6 +222,21 @@ const mainHTML = `<!DOCTYPE html>
     <p id="statusStep" class="muted">Wird gestartet …</p>
     <progress id="statusBar" max="100" value="0"></progress>
     <p class="muted" id="statusMeta"></p>
+    <div class="flip" id="flipBox" hidden>
+      <p><strong>Vorderseiten fertig (<span id="flipCount">0</span>).</strong>
+        Nimm den Stapel aus der Ablage, dreh ihn als Ganzes um, ohne die
+        Reihenfolge zu ändern, und leg ihn wieder in den Einzug.</p>
+      <div class="row">
+        <form method="post" action="/duplex">
+          <input type="hidden" name="action" value="continue">
+          <button type="submit">Rückseiten scannen</button>
+        </form>
+        <form method="post" action="/duplex">
+          <input type="hidden" name="action" value="skip">
+          <button class="secondary" type="submit">Ohne Rückseiten fertig</button>
+        </form>
+      </div>
+    </div>
     <div class="thumbs" id="thumbs"></div>
     <form method="post" action="/cancel">
       <button class="secondary" type="submit">Abbrechen</button>
@@ -228,7 +249,8 @@ const mainHTML = `<!DOCTYPE html>
 
     <label for="source">Vorlage</label>
     <select id="source" name="source">
-      <option value="adf">Einzug (mehrere Seiten)</option>
+      <option value="adf">Einzug, einseitig</option>
+      <option value="adf_duplex">Einzug, doppelseitig (Stapel wird umgedreht)</option>
       <option value="flatbed">Glas (eine Seite)</option>
     </select>
 
@@ -257,6 +279,13 @@ const mainHTML = `<!DOCTYPE html>
       <option value="pdf" selected>Eine PDF-Datei (alle Seiten)</option>
       <option value="png">Einzelne Bilder (PNG, eine Datei pro Seite)</option>
     </select>
+
+    <label class="check"><input type="checkbox" name="drop_blank" value="1" checked>
+      Leere Seiten entfernen</label>
+    {{if .CanOCR}}
+    <label class="check" id="ocrRow"><input type="checkbox" name="ocr" value="1" checked>
+      Texterkennung (durchsuchbar, Seiten aufrichten und gerade ziehen)</label>
+    {{end}}
 
     <label for="prefix">Name</label>
     <input id="prefix" name="prefix" type="text" value="scan" maxlength="32">
@@ -304,6 +333,7 @@ var stepEl = document.getElementById('statusStep');
 var barEl = document.getElementById('statusBar');
 var metaEl = document.getElementById('statusMeta');
 var thumbsEl = document.getElementById('thumbs');
+var flipBox = document.getElementById('flipBox');
 var shownJob = '', shownPages = 0, pendingEl = null;
 
 // Fertige Seiten als Vorschau anhaengen, die gerade laufende als Platzhalter.
@@ -362,6 +392,8 @@ async function poll() {
     if (s.elapsed > 0) { parts.push('Laufzeit ' + mmss(s.elapsed)); }
     metaEl.textContent = parts.join(' · ');
     updateThumbs(s);
+    flipBox.hidden = !s.waiting;
+    document.getElementById('flipCount').textContent = s.fronts;
     setTimeout(poll, 2000);
     return;
   }
@@ -379,6 +411,13 @@ async function poll() {
 }
 
 if ({{.Busy}}) { poll(); }
+
+// Texterkennung gibt es nur fuer PDF.
+var outSel = document.getElementById('output'), ocrRow = document.getElementById('ocrRow');
+if (outSel && ocrRow) {
+  var syncOCR = function () { ocrRow.hidden = outSel.value !== 'pdf'; };
+  outSel.addEventListener('change', syncOCR); syncOCR();
+}
 
 document.getElementById('scanForm')?.addEventListener('submit', function (e) {
   var b = e.target.querySelector('button[type=submit]');

@@ -36,6 +36,9 @@ type ScanOptions struct {
 	Source     string // "Automatic Document Feeder" oder "FlatBed"
 	Prefix     string
 	Output     string // outputPDF oder outputPNG
+	Duplex     bool   // Einzug doppelseitig: zweiter Durchgang fuer Rueckseiten
+	OCR        bool   // Texterkennung, Aufrichten und Geradeziehen (nur PDF)
+	DropBlank  bool   // leere Seiten entfernen
 }
 
 const (
@@ -62,6 +65,8 @@ type Job struct {
 	Note     string    `json:"note"`
 	Started  time.Time `json:"started"`
 	Finished time.Time `json:"finished"`
+	Waiting  bool      `json:"waiting"` // wartet auf das Umdrehen des Stapels
+	Fronts   int       `json:"fronts"`  // Anzahl Vorderseiten beim Doppelseitig-Scan
 
 	// Arbeitsverzeichnis mit den bisher gescannten Seiten, nur waehrend
 	// der Auftrag laeuft. Fuer die Vorschau.
@@ -79,6 +84,7 @@ type Station struct {
 	cancel context.CancelFunc
 
 	previewMu sync.Mutex
+	flip      chan duplexAction
 }
 
 func NewStation(cfg Config) *Station {
@@ -123,6 +129,7 @@ func (s *Station) Start(u User, opts ScanOptions) error {
 	s.job = job
 	s.busy = true
 	s.cancel = cancel
+	s.flip = make(chan duplexAction, 1)
 	s.mu.Unlock()
 
 	go func() {
@@ -145,6 +152,8 @@ func (s *Station) Start(u User, opts ScanOptions) error {
 		}
 		s.busy = false
 		s.cancel = nil
+		s.flip = nil
+		job.Waiting = false
 	}()
 
 	return nil
@@ -192,11 +201,38 @@ func (s *Station) run(ctx context.Context, job *Job, u User, opts ScanOptions) e
 		os.RemoveAll(workdir)
 	}()
 
-	pages, err := s.scanPages(ctx, job, workdir, opts)
+	label := "Seite"
+	if opts.Duplex {
+		label = "Vorderseite"
+	}
+	pages, err := s.scanPages(ctx, job, workdir, opts, 1, label)
 	if err != nil {
 		return err
 	}
 	s.setPages(job, len(pages))
+
+	var notes []string
+	if opts.Duplex {
+		pages, notes, err = s.scanBacks(ctx, job, workdir, opts, pages)
+		if err != nil {
+			return err
+		}
+	}
+
+	if opts.DropBlank {
+		s.setStep(job, "Leere Seiten suchen", 0)
+		var removed int
+		pages, removed = dropBlank(pages, opts.Resolution)
+		if removed > 0 {
+			notes = append(notes, fmt.Sprintf("%d leere Seite(n) entfernt.", removed))
+		}
+	}
+	s.setPages(job, len(pages))
+	if len(notes) > 0 {
+		s.mu.Lock()
+		job.Note = strings.Join(notes, " ")
+		s.mu.Unlock()
+	}
 
 	base := fmt.Sprintf("%s_%s", opts.Prefix, job.Started.Format("2006-01-02_1504"))
 
@@ -218,13 +254,13 @@ func (s *Station) run(ctx context.Context, job *Job, u User, opts ScanOptions) e
 		// Texterkennung nur fuer die Download-Ablage. Ziele wie Paperless
 		// erkennen den Text selbst und drehen dabei auch die Seiten; eine
 		// eigene Textebene wuerde das dort verhindern (OCR-Modus "skip").
-		if _, err := exec.LookPath("ocrmypdf"); err == nil && u.Target == "download" {
+		if opts.OCR && ocrAvailable() && u.Target == "download" {
 			s.setStep(job, "Texterkennung", 0)
 			if err := s.runOCR(ctx, pdf); err != nil {
 				// Ohne Texterkennung ist das PDF weiterhin brauchbar.
 				log.Printf("Auftrag %s: OCR uebersprungen: %v", job.ID, err)
 				s.mu.Lock()
-				job.Note = "Hinweis: Die Texterkennung ist fehlgeschlagen, das PDF enthaelt nur Bilder."
+				job.Note = strings.TrimSpace(job.Note + " Die Texterkennung ist fehlgeschlagen, das PDF enthält nur Bilder.")
 				s.mu.Unlock()
 			}
 		}
@@ -282,9 +318,62 @@ func (s *Station) storeAll(outs []outFile, userID string) error {
 	return nil
 }
 
+// scanBacks wartet, bis der Stapel umgedreht ist, scannt die Rueckseiten und
+// setzt alles in die richtige Reihenfolge.
+func (s *Station) scanBacks(ctx context.Context, job *Job, workdir string, opts ScanOptions, fronts []string) ([]string, []string, error) {
+	s.mu.Lock()
+	job.Waiting = true
+	job.Fronts = len(fronts)
+	job.Step = "Stapel umdrehen und erneut einlegen"
+	job.Progress = 0
+	flip := s.flip
+	s.mu.Unlock()
+
+	var act duplexAction
+	select {
+	case act = <-flip:
+	case <-ctx.Done():
+		return nil, nil, errors.New("Der Scan wurde abgebrochen oder hat zu lange gedauert.")
+	case <-time.After(duplexWait):
+		s.mu.Lock()
+		job.Waiting = false
+		s.mu.Unlock()
+		return fronts, []string{"Es wurde nicht umgedreht, nur die Vorderseiten wurden gespeichert."}, nil
+	}
+	if act == duplexSkip {
+		return fronts, nil, nil
+	}
+
+	backs, err := s.scanPages(ctx, job, workdir, opts, len(fronts)+1, "Rückseite")
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, err
+		}
+		// Die Vorderseiten nicht verlieren, nur weil der zweite Durchgang
+		// scheiterte.
+		return fronts, []string{"Die Rückseiten konnten nicht gescannt werden (" + err.Error() + "), gespeichert sind nur die Vorderseiten."}, nil
+	}
+
+	all, ok := interleave(fronts, backs)
+	if !ok {
+		return all, []string{fmt.Sprintf(
+			"Achtung: %d Vorderseiten, aber %d Rückseiten. Die Reihenfolge stimmt ab der Abweichung vermutlich nicht.",
+			len(fronts), len(backs))}, nil
+	}
+	return all, nil, nil
+}
+
+func ocrAvailable() bool {
+	_, err := exec.LookPath("ocrmypdf")
+	return err == nil
+}
+
 var progressRe = regexp.MustCompile(`([0-9]+(?:\.[0-9]+)?)%`)
 
-func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts ScanOptions) ([]string, error) {
+// scanPages scannt einen Durchgang. Die Seiten werden ab Nummer start
+// abgelegt (page_<start>.png, ...), zurueck kommen nur die dieses Durchgangs.
+// label beschriftet den Fortschritt ("Seite", "Vorderseite", "Rueckseite").
+func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts ScanOptions, start int, label string) ([]string, error) {
 	args := []string{
 		"-d", s.cfg.Scanner,
 		"--source", opts.Source,
@@ -297,9 +386,10 @@ func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts 
 		"--progress",
 	}
 	if opts.Source == sourceFlatbed {
-		args = append(args, "-o", filepath.Join(workdir, "page_001.png"))
+		args = append(args, "-o", filepath.Join(workdir, fmt.Sprintf("page_%03d.png", start)))
 	} else {
-		args = append(args, "--batch="+filepath.Join(workdir, "page_%03d.png"), "--batch-print")
+		args = append(args, "--batch="+filepath.Join(workdir, "page_%03d.png"),
+			fmt.Sprintf("--batch-start=%d", start), "--batch-print")
 	}
 
 	cmd := exec.CommandContext(ctx, "scanimage", args...)
@@ -339,13 +429,13 @@ func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts 
 			fmt.Sscanf(m[1], "%f", &p)
 			// "Scanning page N" kommt zu Beginn der Seite, pagesSeen ist also
 			// schon die aktuelle Seite. Beim Flachbett fehlt die Zeile.
-			s.setStep(job, fmt.Sprintf("Seite %d scannen", max(pagesSeen, 1)), int(p))
+			s.setStep(job, fmt.Sprintf("%s %d scannen", label, max(pagesSeen, 1)), int(p))
 			continue
 		}
 		if strings.Contains(line, "Scanning page") {
 			pagesSeen++
-			s.setStep(job, fmt.Sprintf("Seite %d scannen", pagesSeen), 0)
-			s.setPages(job, pagesSeen)
+			s.setStep(job, fmt.Sprintf("%s %d scannen", label, pagesSeen), 0)
+			s.setPages(job, start-1+pagesSeen)
 			continue
 		}
 		tail = append(tail, line)
@@ -363,6 +453,10 @@ func (s *Station) scanPages(ctx context.Context, job *Job, workdir string, opts 
 	// Teilweise geschriebene Dateien am Ende eines Stapels verwerfen.
 	var good []string
 	for _, p := range pages {
+		var n int
+		if _, err := fmt.Sscanf(filepath.Base(p), "page_%d.png", &n); err != nil || n < start {
+			continue // anderer Durchgang
+		}
 		if st, err := os.Stat(p); err == nil && st.Size() > 0 {
 			good = append(good, p)
 		} else {
@@ -434,6 +528,9 @@ func (s *Station) runOCR(ctx context.Context, pdf string) error {
 		// die schon richtig stehen, werden zuverlaessig als aufrecht erkannt
 		// und nicht gedreht, deshalb ist eine niedrige Schwelle unbedenklich.
 		"--rotate-pages", "--rotate-pages-threshold", "2",
+		// Schraeg eingezogene Blaetter gerade ziehen (gemessen 0,5 bis 2,5
+		// Grad, je Blatt verschieden).
+		"--deskew",
 		"--quiet", pdf, tmp)
 	if msg, err := runCaptured(cmd); err != nil {
 		os.Remove(tmp)

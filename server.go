@@ -63,6 +63,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/download/", s.handleDownload)
 	mux.HandleFunc("/delete", s.handleDelete)
 	mux.HandleFunc("/preview/", s.handlePreview)
+	mux.HandleFunc("/duplex", s.handleDuplex)
 	return mux
 }
 
@@ -270,8 +271,12 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	source := sourceADF
-	if r.FormValue("source") == "flatbed" {
+	duplex := false
+	switch r.FormValue("source") {
+	case "flatbed":
 		source = sourceFlatbed
+	case "adf_duplex":
+		duplex = true
 	}
 
 	prefix := strings.TrimSpace(r.FormValue("prefix"))
@@ -288,12 +293,18 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		output = outputPNG
 	}
 
-	opts := ScanOptions{Mode: mode, Resolution: res, Source: source, Prefix: prefix, Output: output}
+	opts := ScanOptions{
+		Mode: mode, Resolution: res, Source: source, Prefix: prefix, Output: output,
+		Duplex:    duplex,
+		OCR:       r.FormValue("ocr") == "1",
+		DropBlank: r.FormValue("drop_blank") == "1",
+	}
 	if err := s.st.Start(u, opts); err != nil {
 		redirectErr(w, r, "Es läuft gerade ein anderer Scan. Bitte warten, das Gerät kann nur einen Auftrag auf einmal.")
 		return
 	}
-	log.Printf("Auftrag gestartet von %s: %s, %d dpi, %s, %s", u.ID, mode, res, source, output)
+	log.Printf("Auftrag gestartet von %s: %s, %d dpi, %s, doppelseitig=%v, %s, OCR=%v, Leerseiten weg=%v",
+		u.ID, mode, res, source, duplex, output, opts.OCR, opts.DropBlank)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -326,6 +337,8 @@ type statusResponse struct {
 	Elapsed  int      `json:"elapsed"`
 	Job      string   `json:"job,omitempty"`
 	Done     int      `json:"done"`
+	Waiting  bool     `json:"waiting"`
+	Fronts   int      `json:"fronts"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +361,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		resp.Note = job.Note
 		resp.File = job.File
 		resp.Job = job.ID
+		resp.Waiting = job.Waiting
+		resp.Fronts = job.Fronts
 		if job.State == StateRunning {
 			resp.Done = s.st.CompletedPages(u.ID)
 		}
@@ -405,6 +420,25 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/?info="+urlEncode("Datei gelöscht."), http.StatusSeeOther)
+}
+
+// handleDuplex setzt einen wartenden Doppelseitig-Auftrag fort:
+// action=continue scannt die Rueckseiten, action=skip schliesst ohne ab.
+func (s *Server) handleDuplex(w http.ResponseWriter, r *http.Request) {
+	u, ok := s.currentUser(r)
+	if !ok || r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	a := duplexContinue
+	if r.FormValue("action") == "skip" {
+		a = duplexSkip
+	}
+	if !s.st.DuplexAction(u.ID, a) {
+		redirectErr(w, r, "Es wartet gerade kein eigener Scan auf die Rückseiten.")
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // handlePreview liefert eine verkleinerte Ansicht einer bereits gescannten
