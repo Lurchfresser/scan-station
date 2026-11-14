@@ -3,3 +3,4 @@ config.json
 scan-station
 *.tar.gz
 .git/
+.env

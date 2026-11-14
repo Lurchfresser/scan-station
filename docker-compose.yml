@@ -1,3 +1,14 @@
+# Betrieb mit Dokploy hinter Traefik.
+#
+# Dokploy: Compose-App aus diesem Repository anlegen, Variablen aus
+# .env.example in den Environment-Tab kopieren und unter "Domains" die Domain
+# auf Service scan-station, Port 8080 legen. Dokploy haengt den Container
+# dabei ins dokploy-network und setzt die Traefik-Labels selbst.
+#
+# Lokal ohne Dokploy: cp .env.example .env, Werte eintragen,
+# SCAN_TRUST_PROXY=false setzen und voruebergehend einen Port freigeben:
+#   ports: ["8081:8080"]
+
 services:
   scan-station:
     build:
@@ -12,26 +23,16 @@ services:
 
     # Normales Bridge-Netz genuegt: Der Treiber baut nur ausgehende
     # Verbindungen zum Scanner auf (TCP 54921), die gehen ueber das NAT von
-    # Docker. In Dokploy wird die Domain unter "Domains" angelegt (Service
-    # scan-station, Port 8080); Dokploy haengt den Container dabei ins
-    # dokploy-network und setzt die Traefik-Labels selbst.
+    # Docker. Kein Port wird veroeffentlicht, erreichbar nur ueber Traefik.
 
-    # VORUEBERGEHEND zum Testen im LAN. Vor dem Umzug nach Dokploy entfernen
-    # und SCAN_TRUST_PROXY=true setzen.
-    ports:
-      - "8081:8080"
-
-    # Die Konfiguration kommt aus der Umgebung. Lokal liest docker compose
-    # die Datei .env (nicht im Git), in Dokploy der Environment-Tab.
     environment:
       TZ: Europe/Berlin
       SCAN_USERS: ${SCAN_USERS:?SCAN_USERS fehlt, Format id:Name:PIN[:target],...}
-      SCAN_TRUST_PROXY: ${SCAN_TRUST_PROXY:-false}
+      SCAN_TRUST_PROXY: ${SCAN_TRUST_PROXY:-true}
       SCAN_RETENTION_DAYS: ${SCAN_RETENTION_DAYS:-7}
       SCAN_OCR_LANG: ${SCAN_OCR_LANG:-deu+eng}
-      # Adresse der Weboberflaeche, fuer Links in Matrix-Nachrichten.
       SCAN_PUBLIC_URL: ${SCAN_PUBLIC_URL:-}
-      # Matrix-Benachrichtigungen (optional). SCAN_MATRIX_USERS: id=@name:server,...
+      # Matrix-Benachrichtigungen (optional).
       MATRIX_HOMESERVER: ${MATRIX_HOMESERVER:-}
       MATRIX_TOKEN: ${MATRIX_TOKEN:-}
       SCAN_MATRIX_USERS: ${SCAN_MATRIX_USERS:-}
@@ -44,6 +45,5 @@ services:
       PGID: "1000"
 
     volumes:
-      # In Dokploy einen festen Pfad setzen (z.B. DATA_DIR=/opt/scan-station-data),
-      # damit die Scans ein Redeploy ueberleben.
-      - ${DATA_DIR:-./data}:/data
+      # Fester Pfad auf dem Host, damit die Scans ein Redeploy ueberleben.
+      - ${DATA_DIR:-/opt/scan-station-data}:/data
