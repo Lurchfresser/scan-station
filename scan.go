@@ -89,11 +89,12 @@ type Station struct {
 	previewMu sync.Mutex
 	flip      chan duplexAction
 
-	notify *Notifier // nil, wenn Matrix nicht eingerichtet ist
+	notify    *Notifier  // nil, wenn Matrix nicht eingerichtet ist
+	paperless *Paperless // nil, wenn Paperless nicht eingerichtet ist
 }
 
 func NewStation(cfg Config) *Station {
-	return &Station{cfg: cfg, notify: NewNotifier(cfg)}
+	return &Station{cfg: cfg, notify: NewNotifier(cfg), paperless: NewPaperless(cfg)}
 }
 
 // Snapshot gibt eine Kopie des aktuellen oder letzten Auftrags zurueck.
@@ -277,43 +278,34 @@ func (s *Station) run(ctx context.Context, job *Job, u User, opts ScanOptions) e
 		outs = []outFile{{path: pdf, name: name}}
 	}
 
-	switch u.Target {
-	case "ocis":
-		s.setStep(job, "Upload in die Cloud", 0)
-		var upErr error
-		for _, o := range outs {
-			if upErr = s.upload(ctx, o.path, u.Remote, o.name); upErr != nil {
-				break
-			}
-		}
-		if upErr != nil {
-			// Der Scan ist zu wertvoll, um ihn zu verlieren: bei einem
-			// fehlgeschlagenen Upload bleibt er lokal abrufbar.
-			if saveErr := s.storeAll(outs, u.ID); saveErr != nil {
-				return fmt.Errorf("%v (auch die lokale Sicherung schlug fehl: %v)", upErr, saveErr)
-			}
-			s.mu.Lock()
-			job.File = outs[0].name
-			job.Target = "download"
-			s.mu.Unlock()
-			return fmt.Errorf("%v Der Scan liegt stattdessen hier zum Download bereit", upErr)
-		}
-		s.mu.Lock()
-		if len(outs) == 1 {
-			job.Note = fmt.Sprintf("In der Cloud gespeichert: %s/%s", u.Remote, outs[0].name)
-		} else {
-			job.Note = fmt.Sprintf("%d Bilder in der Cloud gespeichert unter %s.", len(outs), u.Remote)
-		}
-		s.mu.Unlock()
+	// Immer zuerst lokal ablegen. Bei Paperless ist das die Sicherungskopie,
+	// falls Paperless den Scan ablehnt oder nicht erreichbar ist; sie wird
+	// mit der Aufbewahrungsfrist geloescht.
+	s.setStep(job, "Ablegen", 0)
+	if err := s.storeAll(outs, u.ID); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	job.File = outs[0].name
+	s.mu.Unlock()
 
-	default:
-		s.setStep(job, "Ablegen", 0)
-		if err := s.storeAll(outs, u.ID); err != nil {
-			return err
+	if u.Target == "paperless" {
+		if s.paperless == nil {
+			return errors.New("Paperless ist nicht eingerichtet. Der Scan liegt hier zum Download bereit.")
+		}
+		s.setStep(job, "An Paperless senden", 0)
+		var tasks []paperlessTask
+		for _, o := range outs {
+			task, err := s.paperless.Upload(ctx, o.path, o.name)
+			if err != nil {
+				return fmt.Errorf("%v Der Scan liegt hier zum Download bereit.", err)
+			}
+			tasks = append(tasks, paperlessTask{id: task, name: o.name})
 		}
 		s.mu.Lock()
-		job.File = outs[0].name
+		job.Note = strings.TrimSpace(job.Note + " An Paperless übergeben, die Verarbeitung dort dauert einen Moment.")
 		s.mu.Unlock()
+		go s.followPaperless(u.ID, tasks)
 	}
 
 	return nil
@@ -576,13 +568,35 @@ func (s *Station) runOCR(ctx context.Context, pdf string) error {
 	return os.Rename(tmp, pdf)
 }
 
-// upload kopiert eine Datei unter dem Namen name nach remote.
-func (s *Station) upload(ctx context.Context, src, remote, name string) error {
-	cmd := exec.CommandContext(ctx, "rclone", "copyto", src, strings.TrimSuffix(remote, "/")+"/"+name)
-	if msg, err := runCaptured(cmd); err != nil {
-		return fmt.Errorf("Der Upload in die Cloud ist fehlgeschlagen: %s.", msgOr(msg, err))
+type paperlessTask struct {
+	id   string
+	name string
+}
+
+// followPaperless verfolgt im Hintergrund, ob Paperless die Dokumente
+// angenommen hat, und meldet das Ergebnis per Matrix.
+func (s *Station) followPaperless(userID string, tasks []paperlessTask) {
+	for _, t := range tasks {
+		ctx, cancel := context.WithTimeout(context.Background(), paperlessFollow)
+		res, err := s.paperless.Follow(ctx, t.id)
+		cancel()
+		switch {
+		case err != nil:
+			log.Printf("Paperless: Ergebnis fuer %s unbekannt: %v", t.name, err)
+		case res.OK:
+			log.Printf("Paperless: %s angenommen %s", t.name, res.DocURL)
+			msg := "📄 In Paperless angekommen: " + t.name
+			if res.DocURL != "" {
+				msg += "\n" + res.DocURL
+			}
+			s.notify.Notify(userID, msg)
+		default:
+			log.Printf("Paperless: %s abgelehnt: %s", t.name, res.Message)
+			s.notify.Notify(userID, fmt.Sprintf(
+				"⚠️ Paperless hat %s nicht übernommen: %s\nDie Datei liegt noch zum Download bereit.",
+				t.name, res.Message)+s.notify.link())
+		}
 	}
-	return nil
 }
 
 // store legt eine Datei im Ordner der Person ab, sichtbar nur fuer sie.

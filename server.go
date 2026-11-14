@@ -64,6 +64,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/delete", s.handleDelete)
 	mux.HandleFunc("/preview/", s.handlePreview)
 	mux.HandleFunc("/duplex", s.handleDuplex)
+	mux.HandleFunc("/favicon.svg", handleIcon(faviconSVG, "image/svg+xml"))
+	// Manche Browser fragen ohne Hinweis im HTML nach /favicon.ico; PNG
+	// unter diesem Namen verstehen alle.
+	mux.HandleFunc("/favicon.ico", handleIcon(faviconPNG32, "image/png"))
+	mux.HandleFunc("/apple-touch-icon.png", handleIcon(touchIconPNG, "image/png"))
 	return mux
 }
 

@@ -36,6 +36,9 @@ func main() {
 	checkTools(cfg)
 
 	station := NewStation(cfg)
+	if station.paperless != nil {
+		go station.paperless.CheckLogin()
+	}
 	if station.notify != nil {
 		go station.notify.CheckLogin()
 	} else if cfg.MatrixHomeserver != "" || len(cfg.MatrixUsers) > 0 {
@@ -54,8 +57,8 @@ func main() {
 	log.Printf("Scanner: %s", cfg.Scanner)
 	log.Printf("Ablage:  %s (Aufbewahrung: %d Tage)", cfg.DataDir, cfg.RetentionDays)
 	for _, u := range cfg.Users {
-		if u.Target == "ocis" {
-			log.Printf("Benutzer %-10s -> Cloud (%s)", u.Name, u.Remote)
+		if u.Target == "paperless" {
+			log.Printf("Benutzer %-10s -> Paperless", u.Name)
 		} else {
 			log.Printf("Benutzer %-10s -> Download", u.Name)
 		}
@@ -73,12 +76,6 @@ func main() {
 // startet trotzdem, damit man die Oberflaeche auch ohne Scanner ansehen kann.
 func checkTools(cfg Config) {
 	required := []string{"scanimage", "img2pdf"}
-	for _, u := range cfg.Users {
-		if u.Target == "ocis" {
-			required = append(required, "rclone")
-			break
-		}
-	}
 	for _, tool := range required {
 		if _, err := exec.LookPath(tool); err != nil {
 			log.Printf("WARNUNG: %s ist nicht installiert, Scans werden fehlschlagen.", tool)

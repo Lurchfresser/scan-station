@@ -20,9 +20,8 @@ type loginData struct {
 
 type mainData struct {
 	User          User
-	IsCloud       bool
+	IsPaperless   bool
 	CanOCR        bool
-	Remote        string
 	Files         []fileView
 	RetentionDays int
 	Busy          bool
@@ -67,9 +66,8 @@ func (s *Server) renderMain(w http.ResponseWriter, r *http.Request, u User, errM
 
 	data := mainData{
 		User:          u,
-		IsCloud:       u.Target == "ocis",
+		IsPaperless:   u.Target == "paperless",
 		CanOCR:        ocrAvailable() && u.Target == "download",
-		Remote:        u.Remote,
 		Files:         views,
 		RetentionDays: s.cfg.RetentionDays,
 		Busy:          busy,
@@ -158,6 +156,10 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scanner</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/favicon.ico" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#2f6f4f">
 <style>` + styleCSS + `</style>
 </head>
 <body>
@@ -186,6 +188,10 @@ const mainHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scanner</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/favicon.ico" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#2f6f4f">
 <style>` + styleCSS + `</style>
 </head>
 <body>
@@ -294,8 +300,8 @@ const mainHTML = `<!DOCTYPE html>
     <p class="muted">
       Das Gerät braucht pro Seite mehrere Minuten. Du kannst die Seite
       währenddessen offen lassen.
-      {{if .IsCloud}}Deine Scans landen in der Cloud unter
-      <code>{{.Remote}}</code>.{{end}}
+      {{if .IsPaperless}}Deine Scans gehen an Paperless, die Texterkennung
+      macht Paperless. Eine Kopie bleibt unten zum Download.{{end}}
     </p>
   </form>
 
@@ -321,7 +327,7 @@ const mainHTML = `<!DOCTYPE html>
     <p class="muted">Dateien werden nach {{.RetentionDays}} Tagen automatisch gelöscht.</p>
     {{end}}
   </div>
-  {{else if not .IsCloud}}
+  {{else}}
   <p class="muted">Noch keine Scans vorhanden.</p>
   {{end}}
 </main>

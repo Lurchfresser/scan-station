@@ -32,6 +32,9 @@ services:
       SCAN_RETENTION_DAYS: ${SCAN_RETENTION_DAYS:-7}
       SCAN_OCR_LANG: ${SCAN_OCR_LANG:-deu+eng}
       SCAN_PUBLIC_URL: ${SCAN_PUBLIC_URL:-}
+      # Paperless-ngx (fuer Personen mit target paperless).
+      PAPERLESS_URL: ${PAPERLESS_URL:-}
+      PAPERLESS_TOKEN: ${PAPERLESS_TOKEN:-}
       # Matrix-Benachrichtigungen (optional).
       MATRIX_HOMESERVER: ${MATRIX_HOMESERVER:-}
       MATRIX_TOKEN: ${MATRIX_TOKEN:-}

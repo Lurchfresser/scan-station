@@ -15,14 +15,14 @@ import (
 //
 // Target bestimmt, wohin ein fertiger Scan geht:
 //
-//	"ocis"     -> wird mit rclone nach Remote hochgeladen und lokal geloescht
-//	"download" -> bleibt auf dem Server liegen und ist ueber die Seite abrufbar
+//	"download"  -> bleibt auf dem Server liegen und ist ueber die Seite abrufbar
+//	"paperless" -> geht an Paperless-ngx; eine Kopie bleibt bis zum Ablauf der
+//	               Aufbewahrungsfrist zum Download liegen
 type User struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	PIN    string `json:"pin"`
 	Target string `json:"target"`
-	Remote string `json:"rclone_remote"`
 }
 
 type Config struct {
@@ -44,6 +44,10 @@ type Config struct {
 
 	// Oeffentliche Adresse der Weboberflaeche, fuer Links in Nachrichten.
 	PublicURL string `json:"public_url"`
+
+	// Paperless-ngx: Adresse und API-Token (Profil -> API-Token).
+	PaperlessURL   string `json:"paperless_url"`
+	PaperlessToken string `json:"paperless_token"`
 
 	// Matrix-Benachrichtigungen. Nur aktiv, wenn alle drei gesetzt sind.
 	MatrixHomeserver string            `json:"matrix_homeserver"`
@@ -116,14 +120,14 @@ func loadConfig(path string) (Config, error) {
 			return cfg, fmt.Errorf("PIN von %q ist kuerzer als 4 Zeichen", u.ID)
 		}
 		switch u.Target {
-		case "ocis":
-			if u.Remote == "" {
-				return cfg, fmt.Errorf("%q hat target \"ocis\", aber kein rclone_remote", u.ID)
+		case "paperless":
+			if cfg.PaperlessURL == "" || cfg.PaperlessToken == "" {
+				return cfg, fmt.Errorf("%q hat target \"paperless\", aber PAPERLESS_URL oder PAPERLESS_TOKEN fehlt", u.ID)
 			}
 		case "download":
 			// nichts weiter noetig
 		default:
-			return cfg, fmt.Errorf("%q hat unbekanntes target %q (erlaubt: download, ocis)", u.ID, u.Target)
+			return cfg, fmt.Errorf("%q hat unbekanntes target %q (erlaubt: download, paperless)", u.ID, u.Target)
 		}
 	}
 
@@ -134,6 +138,9 @@ func loadConfig(path string) (Config, error) {
 		if !validMXID.MatchString(mxid) {
 			return cfg, fmt.Errorf("Matrix: %q ist keine gueltige Matrix-ID (erwartet @name:server)", mxid)
 		}
+	}
+	if cfg.PaperlessURL != "" && !strings.HasPrefix(cfg.PaperlessURL, "http") {
+		return cfg, fmt.Errorf("PAPERLESS_URL muss mit http:// oder https:// beginnen")
 	}
 	if cfg.MatrixHomeserver != "" && !strings.HasPrefix(cfg.MatrixHomeserver, "http") {
 		return cfg, fmt.Errorf("MATRIX_HOMESERVER muss mit http:// oder https:// beginnen")
@@ -194,6 +201,8 @@ func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
 		return err
 	}
 	str("SCAN_PUBLIC_URL", &cfg.PublicURL)
+	str("PAPERLESS_URL", &cfg.PaperlessURL)
+	str("PAPERLESS_TOKEN", &cfg.PaperlessToken)
 	str("MATRIX_HOMESERVER", &cfg.MatrixHomeserver)
 	str("MATRIX_TOKEN", &cfg.MatrixToken)
 	if v, ok := lookup("SCAN_MATRIX_USERS"); ok && strings.TrimSpace(v) != "" {
@@ -286,8 +295,7 @@ const configTemplate = `{
       "id": "ich",
       "name": "Ich",
       "pin": "BITTE-AENDERN",
-      "target": "ocis",
-      "rclone_remote": "ocis:Scans"
+      "target": "download"
     },
     {
       "id": "anna",
