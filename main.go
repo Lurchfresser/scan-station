@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.json", "Pfad zur Konfigurationsdatei")
+	configPath := flag.String("config", "config.json", "Pfad zur Konfigurationsdatei (optional, SCAN_*-Variablen haben Vorrang)")
 	initConfig := flag.Bool("init", false, "Beispielkonfiguration anlegen und beenden")
 	flag.Parse()
 
@@ -26,10 +26,6 @@ func main() {
 
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		if os.IsNotExist(err) {
-			log.Fatalf("Keine Konfiguration gefunden (%s).\n"+
-				"Mit \"%s -init\" eine Vorlage anlegen.", *configPath, os.Args[0])
-		}
 		log.Fatalf("Konfiguration: %v", err)
 	}
 

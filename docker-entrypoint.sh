@@ -15,9 +15,11 @@ if [ -z "${SCANNER_IP:-}" ]; then
     exit 1
 fi
 
-if [ ! -f "$CONFIG" ]; then
-    echo "FEHLER: Keine Konfiguration unter $CONFIG." >&2
-    echo "        config.json als Volume einbinden, Vorlage: config.docker.json" >&2
+# Die Konfiguration kommt aus den SCAN_*-Variablen; eine Datei unter
+# $CONFIG ist optional und wird, falls vorhanden, zuerst gelesen.
+if [ ! -f "$CONFIG" ] && [ -z "${SCAN_USERS:-}" ]; then
+    echo "FEHLER: Weder SCAN_USERS gesetzt noch eine Konfiguration unter $CONFIG." >&2
+    echo "        Beispiel: SCAN_USERS=anna:Anna:1234,ben:Ben:5678" >&2
     exit 1
 fi
 

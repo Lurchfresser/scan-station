@@ -12,24 +12,25 @@ services:
 
     # Normales Bridge-Netz genuegt: Der Treiber baut nur ausgehende
     # Verbindungen zum Scanner auf (TCP 54921), die gehen ueber das NAT von
-    # Docker. Kein Port wird veroeffentlicht, erreichbar ist der Dienst nur
-    # ueber Traefik. Die Domain wird in Dokploy unter "Domains" angelegt
-    # (Service scan-station, Port 8080); Dokploy haengt den Container dabei
-    # ins dokploy-network und setzt die Traefik-Labels selbst.
-    #
-    # Lokal ohne Dokploy testen: einen Port freigeben, z.B.
-    #   ports: ["127.0.0.1:8081:8080"]
-    # und in config.json "trust_proxy": false setzen.
+    # Docker. In Dokploy wird die Domain unter "Domains" angelegt (Service
+    # scan-station, Port 8080); Dokploy haengt den Container dabei ins
+    # dokploy-network und setzt die Traefik-Labels selbst.
 
     # VORUEBERGEHEND zum Testen im LAN. Vor dem Umzug nach Dokploy entfernen
-    # und in config.json "trust_proxy" wieder auf true setzen.
+    # und SCAN_TRUST_PROXY=true setzen.
     ports:
       - "8081:8080"
 
+    # Die Konfiguration kommt aus der Umgebung. Lokal liest docker compose
+    # die Datei .env (nicht im Git), in Dokploy der Environment-Tab.
     environment:
       TZ: Europe/Berlin
+      SCAN_USERS: ${SCAN_USERS:?SCAN_USERS fehlt, Format id:Name:PIN[:target],...}
+      SCAN_TRUST_PROXY: ${SCAN_TRUST_PROXY:-false}
+      SCAN_RETENTION_DAYS: ${SCAN_RETENTION_DAYS:-7}
+      SCAN_OCR_LANG: ${SCAN_OCR_LANG:-deu+eng}
       # IP des Scanners. Im Router auf eine feste Adresse festnageln.
-      SCANNER_IP: "192.168.178.98"
+      SCANNER_IP: ${SCANNER_IP:-192.168.178.98}
       SCANNER_MODEL: "MFC-5440CN"
       SCANNER_NAME: "MFC-5440CN"
       # Besitzer der Dateien im Datenordner. `id -u` und `id -g` auf dem Host.
@@ -37,8 +38,6 @@ services:
       PGID: "1000"
 
     volumes:
-      # config.json ist nicht im Git (PINs). In Dokploy als File Mount
-      # anlegen und CONFIG_FILE=../files/config.json setzen, ebenso
-      # DATA_DIR=../files/data, damit die Scans ein Redeploy ueberleben.
-      - ${CONFIG_FILE:-./config.json}:/etc/scan-station/config.json:ro
+      # In Dokploy einen festen Pfad setzen (z.B. DATA_DIR=/opt/scan-station-data),
+      # damit die Scans ein Redeploy ueberleben.
       - ${DATA_DIR:-./data}:/data

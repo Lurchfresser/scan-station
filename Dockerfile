@@ -88,15 +88,16 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 VOLUME /data
 EXPOSE 8080
 
-ENV SCANNER_NAME=MFC-5440CN \
+ENV SCAN_LISTEN=:8080 \
+    SCAN_DATA_DIR=/data \
+    SCANNER_NAME=MFC-5440CN \
     SCANNER_MODEL=MFC-5440CN \
     CONFIG=/etc/scan-station/config.json \
     PUID=1000 \
     PGID=1000
 
-# Port aus config.json lesen ("listen": ":8081"), sonst 8080.
+# Port aus SCAN_LISTEN (z.B. ":8080"), sonst 8080.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD port=$(sed -n 's/.*"listen" *: *"[^"]*:\([0-9][0-9]*\)".*/\1/p' "$CONFIG" | head -n1); \
-        curl -fsS "http://localhost:${port:-8080}/" -o /dev/null
+    CMD port="${SCAN_LISTEN##*:}"; curl -fsS "http://localhost:${port:-8080}/" -o /dev/null
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

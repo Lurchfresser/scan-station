@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // User ist eine Person, die scannen darf.
@@ -52,51 +55,67 @@ func defaultConfig() Config {
 	}
 }
 
+// loadConfig liest die Konfiguration in dieser Reihenfolge:
+//
+//  1. eingebaute Standardwerte
+//  2. die JSON-Datei unter path, falls vorhanden (optional)
+//  3. Umgebungsvariablen SCAN_*, die alles Vorherige ueberschreiben
+//
+// So laesst sich der Dienst komplett ueber Umgebungsvariablen steuern, etwa
+// aus dem Environment-Tab von Dokploy.
 func loadConfig(path string) (Config, error) {
 	cfg := defaultConfig()
 
 	raw, err := os.ReadFile(path)
-	if err != nil {
+	switch {
+	case err == nil:
+		// Unbekannte Felder sollen auffallen, damit ein Tippfehler in der
+		// Konfiguration nicht stillschweigend ignoriert wird.
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
+			return cfg, fmt.Errorf("%s: %w", path, err)
+		}
+	case os.IsNotExist(err):
+		// Ohne Datei muss alles aus der Umgebung kommen.
+	default:
 		return cfg, err
 	}
 
-	// Unbekannte Felder sollen auffallen, damit ein Tippfehler in der
-	// Konfiguration nicht stillschweigend ignoriert wird.
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&cfg); err != nil {
-		return cfg, fmt.Errorf("%s: %w", path, err)
+	if err := applyEnv(&cfg, os.LookupEnv); err != nil {
+		return cfg, err
 	}
 
 	if len(cfg.Users) == 0 {
-		return cfg, fmt.Errorf("%s: keine Benutzer konfiguriert", path)
+		return cfg, errors.New("keine Benutzer konfiguriert: SCAN_USERS setzen " +
+			"(z.B. SCAN_USERS=\"anna:Anna:1234,ben:Ben:5678\") oder eine Konfigurationsdatei anlegen")
 	}
 
 	seen := map[string]bool{}
 	for i, u := range cfg.Users {
 		if !validID.MatchString(u.ID) {
-			return cfg, fmt.Errorf("%s: Benutzer %d: id %q darf nur Buchstaben, Ziffern, - und _ enthalten", path, i+1, u.ID)
+			return cfg, fmt.Errorf("Benutzer %d: id %q darf nur Buchstaben, Ziffern, - und _ enthalten", i+1, u.ID)
 		}
 		if seen[u.ID] {
-			return cfg, fmt.Errorf("%s: id %q kommt doppelt vor", path, u.ID)
+			return cfg, fmt.Errorf("id %q kommt doppelt vor", u.ID)
 		}
 		seen[u.ID] = true
 
 		if u.Name == "" {
-			return cfg, fmt.Errorf("%s: Benutzer %q hat keinen Namen", path, u.ID)
+			return cfg, fmt.Errorf("Benutzer %q hat keinen Namen", u.ID)
 		}
 		if len(u.PIN) < 4 {
-			return cfg, fmt.Errorf("%s: PIN von %q ist kuerzer als 4 Zeichen", path, u.ID)
+			return cfg, fmt.Errorf("PIN von %q ist kuerzer als 4 Zeichen", u.ID)
 		}
 		switch u.Target {
 		case "ocis":
 			if u.Remote == "" {
-				return cfg, fmt.Errorf("%s: %q hat target \"ocis\", aber kein rclone_remote", path, u.ID)
+				return cfg, fmt.Errorf("%q hat target \"ocis\", aber kein rclone_remote", u.ID)
 			}
 		case "download":
 			// nichts weiter noetig
 		default:
-			return cfg, fmt.Errorf("%s: %q hat unbekanntes target %q (erlaubt: ocis, download)", path, u.ID, u.Target)
+			return cfg, fmt.Errorf("%q hat unbekanntes target %q (erlaubt: download, ocis)", u.ID, u.Target)
 		}
 	}
 
@@ -107,6 +126,94 @@ func loadConfig(path string) (Config, error) {
 	cfg.DataDir = abs
 
 	return cfg, nil
+}
+
+// applyEnv uebernimmt gesetzte SCAN_*-Variablen. lookup ist os.LookupEnv,
+// als Parameter, damit es sich ohne echte Umgebung testen laesst.
+func applyEnv(cfg *Config, lookup func(string) (string, bool)) error {
+	str := func(key string, dst *string) {
+		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
+			*dst = strings.TrimSpace(v)
+		}
+	}
+	num := func(key string, dst *int) error {
+		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return fmt.Errorf("%s=%q ist keine Zahl", key, v)
+			}
+			*dst = n
+		}
+		return nil
+	}
+	flag := func(key string, dst *bool) error {
+		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
+			b, err := strconv.ParseBool(strings.TrimSpace(v))
+			if err != nil {
+				return fmt.Errorf("%s=%q: erlaubt sind true oder false", key, v)
+			}
+			*dst = b
+		}
+		return nil
+	}
+
+	str("SCAN_SCANNER", &cfg.Scanner)
+	str("SCAN_LISTEN", &cfg.Listen)
+	str("SCAN_DATA_DIR", &cfg.DataDir)
+	str("SCAN_OCR_LANG", &cfg.OCRLang)
+	for key, dst := range map[string]*int{
+		"SCAN_RETENTION_DAYS":  &cfg.RetentionDays,
+		"SCAN_PAPER_WIDTH_MM":  &cfg.PaperWidthMM,
+		"SCAN_PAPER_HEIGHT_MM": &cfg.PaperHeightMM,
+	} {
+		if err := num(key, dst); err != nil {
+			return err
+		}
+	}
+	if err := flag("SCAN_TRUST_PROXY", &cfg.TrustProxy); err != nil {
+		return err
+	}
+
+	if v, ok := lookup("SCAN_USERS"); ok && strings.TrimSpace(v) != "" {
+		users, err := parseUsers(v)
+		if err != nil {
+			return fmt.Errorf("SCAN_USERS: %w", err)
+		}
+		cfg.Users = users
+	}
+	return nil
+}
+
+// parseUsers liest SCAN_USERS. Personen sind durch Komma (oder Zeilenumbruch)
+// getrennt, die Felder durch Doppelpunkt:
+//
+//	id:Name:PIN[:target]
+//
+// target ist optional und standardmaessig "download". Name darf Leerzeichen
+// enthalten, PIN und Name keinen Doppelpunkt und kein Komma.
+func parseUsers(s string) ([]User, error) {
+	var users []User
+	for i, entry := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '\n' || r == ';' }) {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		parts := strings.Split(entry, ":")
+		if len(parts) < 3 || len(parts) > 4 {
+			return nil, fmt.Errorf("Eintrag %d: erwartet id:Name:PIN oder id:Name:PIN:target", i+1)
+		}
+		u := User{
+			ID:     strings.TrimSpace(parts[0]),
+			Name:   strings.TrimSpace(parts[1]),
+			PIN:    strings.TrimSpace(parts[2]),
+			Target: "download",
+		}
+		if len(parts) == 4 && strings.TrimSpace(parts[3]) != "" {
+			u.Target = strings.TrimSpace(parts[3])
+		}
+		users = append(users, u)
+	}
+	return users, nil
 }
 
 func (c Config) userByID(id string) (User, bool) {

@@ -1,3 +1,4 @@
 config.docker.json
 config.json
 data/
+.env
