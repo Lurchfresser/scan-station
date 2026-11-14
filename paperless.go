@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,26 +60,28 @@ func (p *Paperless) Upload(ctx context.Context, path, name string) (string, erro
 		return "", err
 	}
 	defer f.Close()
-
-	// Datei direkt aus der Platte in die Anfrage streamen, ohne sie ganz in
-	// den Speicher zu laden.
-	pr, pw := io.Pipe()
-	mw := multipart.NewWriter(pw)
-	go func() {
-		part, err := mw.CreateFormFile("document", name)
-		if err == nil {
-			_, err = io.Copy(part, f)
-		}
-		if err == nil {
-			err = mw.Close()
-		}
-		pw.CloseWithError(err)
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url+"/api/documents/post_document/", pr)
+	st, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
+
+	// Multipart-Anfrage mit fester Laenge: Kopf, Datei, Abschluss. Die Datei
+	// wird direkt von der Platte gestreamt. Die Laenge muss vorher feststehen,
+	// denn ohne Content-Length (chunked) kommt bei Paperless keine Datei an
+	// ("No file was submitted").
+	var head bytes.Buffer
+	mw := multipart.NewWriter(&head)
+	if _, err := mw.CreateFormFile("document", name); err != nil {
+		return "", err
+	}
+	tail := "\r\n--" + mw.Boundary() + "--\r\n"
+	body := io.MultiReader(bytes.NewReader(head.Bytes()), f, strings.NewReader(tail))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.url+"/api/documents/post_document/", body)
+	if err != nil {
+		return "", err
+	}
+	req.ContentLength = int64(head.Len()) + st.Size() + int64(len(tail))
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	p.auth(req)
 

@@ -41,6 +41,13 @@ func (f *fakePaperless) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/documents/" && r.Method == http.MethodGet:
 		w.Write([]byte(`{"count":42,"results":[]}`))
 	case r.URL.Path == "/api/documents/post_document/" && r.Method == http.MethodPost:
+		// Wie das echte Paperless (Django hinter Granian): ohne
+		// Content-Length, also chunked, kommt dort keine Datei an.
+		if r.ContentLength < 0 || len(r.TransferEncoding) > 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"document":["No file was submitted."]}`))
+			return
+		}
 		file, hdr, err := r.FormFile("document")
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
