@@ -323,11 +323,6 @@ func (s *Station) storeAll(outs []outFile, userID string) error {
 // scanBacks wartet, bis der Stapel umgedreht ist, scannt die Rueckseiten und
 // setzt alles in die richtige Reihenfolge.
 func (s *Station) scanBacks(ctx context.Context, job *Job, workdir string, opts ScanOptions, fronts []string) ([]string, []string, error) {
-	s.notify.Notify(job.UserID, fmt.Sprintf(
-		"🔄 Vorderseiten fertig (%d). Stapel aus der Ablage nehmen, als Ganzes umdrehen, "+
-			"wieder einlegen und in der Weboberfläche „Rückseiten scannen“ tippen.",
-		len(fronts))+s.notify.link())
-
 	s.mu.Lock()
 	job.Waiting = true
 	job.Fronts = len(fronts)
@@ -335,6 +330,11 @@ func (s *Station) scanBacks(ctx context.Context, job *Job, workdir string, opts 
 	job.Progress = 0
 	flip := s.flip
 	s.mu.Unlock()
+
+	s.notify.Notify(job.UserID, fmt.Sprintf(
+		"🔄 Vorderseiten fertig (%d). Stapel aus der Ablage nehmen, als Ganzes umdrehen "+
+			"und wieder einlegen. Dann hier „weiter“ antworten (oder „fertig“ ohne Rückseiten).",
+		len(fronts))+s.notify.link())
 
 	var act duplexAction
 	select {

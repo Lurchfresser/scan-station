@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -41,6 +42,7 @@ func main() {
 	}
 	if station.notify != nil {
 		go station.notify.CheckLogin()
+		go station.notify.Listen(context.Background(), station.HandleCommand)
 	} else if cfg.MatrixHomeserver != "" || len(cfg.MatrixUsers) > 0 {
 		log.Printf("Hinweis: Matrix unvollstaendig eingerichtet (MATRIX_HOMESERVER, MATRIX_TOKEN und SCAN_MATRIX_USERS noetig)")
 	}

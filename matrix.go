@@ -179,6 +179,10 @@ func (e *matrixError) Error() string {
 }
 
 func (n *Notifier) call(ctx context.Context, method, path string, in, out any) error {
+	return n.callWith(ctx, n.client, method, path, in, out)
+}
+
+func (n *Notifier) callWith(ctx context.Context, client *http.Client, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		raw, err := json.Marshal(in)
@@ -195,7 +199,7 @@ func (n *Notifier) call(ctx context.Context, method, path string, in, out any) e
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := n.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

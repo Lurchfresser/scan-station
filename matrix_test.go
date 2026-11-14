@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeMatrix ist ein minimaler Homeserver: createRoom, send und whoami.
@@ -16,9 +18,54 @@ type fakeMatrix struct {
 	created   int
 	sent      []string // "raum|text"
 	forbidden map[string]bool
+	inbox     []fakeEvent // wartet auf den naechsten /sync
+	syncs     int
+}
+
+type fakeEvent struct{ room, sender, body string }
+
+// Say legt eine Nachricht von sender in room fuer den naechsten /sync ab.
+func (f *fakeMatrix) Say(room, sender, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.inbox = append(f.inbox, fakeEvent{room, sender, body})
+}
+
+func (f *fakeMatrix) sync(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.syncs++
+	first := r.URL.Query().Get("since") == ""
+	var evs []fakeEvent
+	if first {
+		// Alte Nachricht von vor dem Start: darf nicht ausgefuehrt werden.
+		evs = []fakeEvent{{"!raum1:example.org", "@anna:example.org", "weiter"}}
+	} else {
+		evs, f.inbox = f.inbox, nil
+	}
+	f.mu.Unlock()
+	if len(evs) == 0 {
+		time.Sleep(50 * time.Millisecond)
+	}
+	join := map[string]any{}
+	for _, e := range evs {
+		room, _ := join[e.room].(map[string]any)
+		if room == nil {
+			room = map[string]any{"timeline": map[string]any{"events": []any{}}}
+			join[e.room] = room
+		}
+		tl := room["timeline"].(map[string]any)
+		tl["events"] = append(tl["events"].([]any), map[string]any{
+			"type": "m.room.message", "sender": e.sender,
+			"content": map[string]any{"msgtype": "m.text", "body": e.body}})
+	}
+	json.NewEncoder(w).Encode(map[string]any{"next_batch": fmt.Sprintf("s%d", f.syncs), "rooms": map[string]any{"join": join}})
 }
 
 func (f *fakeMatrix) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/_matrix/client/v3/sync" && r.Header.Get("Authorization") == "Bearer geheim" {
+		f.sync(w, r)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if r.Header.Get("Authorization") != "Bearer geheim" {
@@ -140,5 +187,19 @@ func TestMatrixUsersEnv(t *testing.T) {
 	}
 	if validMXID.MatchString("anna:example.org") {
 		t.Error("ID ohne @ angenommen")
+	}
+}
+
+func TestCommandWord(t *testing.T) {
+	for in, want := range map[string]string{
+		"weiter":   "weiter",
+		" Weiter!": "weiter",
+		"> <@scanner-bot:example.org> 🔄 Vorderseiten fertig (3).\n\nja bitte": "ja",
+		"Rückseiten": "rückseiten",
+		"   ":        "",
+	} {
+		if got := commandWord(in); got != want {
+			t.Errorf("commandWord(%q) = %q, erwartet %q", in, got, want)
+		}
 	}
 }
